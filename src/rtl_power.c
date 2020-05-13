@@ -115,6 +115,11 @@ int tuning_count = 0;
 int boxcar = 1;
 int comp_fir_size = 0;
 int peak_hold = 0;
+typedef enum {
+	FORMAT_CSV,		/* -o c */
+	FORMAT_GNUPLOT		/* -o g */
+} output_format_t;
+output_format_t	output_format = FORMAT_CSV;
 
 void usage(void)
 {
@@ -137,8 +142,8 @@ void usage(void)
 		"\t[-p ppm_error (default: 0)]\n"
 		"\t[-S tuner_sleep_usec (default: 5000)]\n"
 		"\t[-R tuner_retry_max (default: 3)]\n"
-		"\tfilename (a '-' dumps samples to stdout)\n"
-		"\t (omitting the filename also uses stdout)\n"
+		"\t[-o format, c=CSV (default), g=gnuplot]\n"
+		"\tfilename (missing or '-' dumps samples to stdout)\n"
 		"\n"
 		"Experimental options:\n"
 		"\t[-w window (default: rectangle)]\n"
@@ -772,6 +777,31 @@ void scanner(size_t channel)
 	}
 }
 
+void save_tuning_header(struct tuning_state* ts, int bw2)
+{
+	int		len = 1 << ts->bin_e;
+	time_t		time_now;
+	char		t_str[50];
+	struct tm	cal_time = {0};
+
+	switch (output_format) {
+	case FORMAT_CSV:
+		// time, Hz low, Hz high, Hz step, samples, dbm, dbm, ...
+		localtime_r(&time_now, &cal_time);
+		strftime(t_str, 50, "%Y-%m-%d, %H:%M:%S", &cal_time);
+		fprintf(file, "%s, ", t_str);
+		fprintf(file, "%lli, %lli, %.2f, %i",
+			(long long)ts->freq - bw2,
+			(long long)ts->freq + bw2,
+			(double)ts->rate / (double)(len*ts->downsample),
+			ts->samples
+		);
+		break;
+	case FORMAT_GNUPLOT:
+		break;
+	}
+}
+
 void save_bin(struct tuning_state* ts, int i, long long freq)
 {
 	// something seems off with the dbm math
@@ -780,7 +810,25 @@ void save_bin(struct tuning_state* ts, int i, long long freq)
 	dbm /= (double)ts->rate;
 	dbm /= (double)ts->samples;
 	dbm  = 10 * log10(dbm);
-	fprintf(file, ", %.2f", dbm);
+	switch (output_format) {
+	case FORMAT_CSV:
+		fprintf(file, ", %.2f", dbm);
+		break;
+	case FORMAT_GNUPLOT:
+		fprintf(file, "%lld, %.2f\n", freq, dbm);
+		break;
+	}
+}
+
+void save_tuning_footer(void)
+{
+	switch (output_format) {
+	case FORMAT_CSV:
+		fprintf(file, "\n");
+		break;
+	case FORMAT_GNUPLOT:
+		break;
+	}
 }
 
 void save_tuning_result(struct tuning_state *ts)
@@ -806,12 +854,7 @@ void save_tuning_result(struct tuning_state *ts)
 	/* Hz low, Hz high, Hz step, samples, dbm, dbm, ... */
 	bin_count = (int)((double)len * (1.0 - ts->crop));
 	bw2 = (int)(((double)ts->rate * (double)bin_count) / (len * 2 * ds));	/* Half bandwidth */
-	fprintf(file, "%lli, %lli, %.2f, %i",
-		(long long)ts->freq - bw2,
-		(long long)ts->freq + bw2,
-		(double)ts->rate / (double)(len*ds),
-		ts->samples
-	);
+	save_tuning_header(ts, bw2);
 
 	/* crop some FFT bins off start and end: */
 	i1 = (int)((double)len * ts->crop * 0.5);
@@ -820,7 +863,7 @@ void save_tuning_result(struct tuning_state *ts)
 	freq = (long long)ts->freq - bw2;
 	for (i=i1; i<=i2; i++, freq += 2*bw2/len)
 		save_bin(ts, i, freq);
-	fprintf(file, "\n");
+	save_tuning_footer();
 
 	/* Reset averages */
 	memset(ts->avg, 0, sizeof(ts->avg[0])*len);
@@ -849,14 +892,12 @@ int main(int argc, char **argv)
 	time_t next_tick;
 	time_t time_now;
 	time_t exit_time = 0;
-	char t_str[50];
-	struct tm cal_time = {0};
 	double (*window_fn)(int, int) = rectangle;
 	int channel = 0;	
 	char *antenna_str = NULL;
 	freq_optarg = "";
 
-	while ((opt = getopt(argc, argv, "a:C:f:i:s:t:d:g:p:e:w:c:F:1PD:OS:R:h")) != -1) {
+	while ((opt = getopt(argc, argv, "a:C:f:i:o:s:t:d:g:p:e:w:c:F:1PD:OS:R:h")) != -1) {
 		switch (opt) {
 		case 'a':
 			antenna_str = optarg;
@@ -883,6 +924,15 @@ int main(int argc, char **argv)
 		case 'e':
 			exit_time = (time_t)((int)round(atoft(optarg)));
 			break;
+		case 'o':	/* output format */
+			if (strcmp(optarg, "c") == 0) {
+				output_format = FORMAT_CSV;
+			} else if (strcmp(optarg, "g") == 0) {
+				output_format = FORMAT_GNUPLOT;
+			} else {
+				fprintf(stderr, "Unknown output format %s\n", optarg);
+				usage();
+			}
 		case 's':
 			if (strcmp("avg",  optarg) == 0) {
 				smoothing = 0;}
@@ -891,21 +941,25 @@ int main(int argc, char **argv)
 			break;
 		case 'w':
 			if (strcmp("rectangle",  optarg) == 0) {
-				window_fn = rectangle;}
-			if (strcmp("hamming",  optarg) == 0) {
-				window_fn = hamming;}
-			if (strcmp("blackman",  optarg) == 0) {
-				window_fn = blackman;}
-			if (strcmp("blackman-harris",  optarg) == 0) {
-				window_fn = blackman_harris;}
-			if (strcmp("hann-poisson",  optarg) == 0) {
-				window_fn = hann_poisson;}
-			if (strcmp("youssef",  optarg) == 0) {
-				window_fn = youssef;}
-			if (strcmp("kaiser",  optarg) == 0) {
-				window_fn = kaiser;}
-			if (strcmp("bartlett",  optarg) == 0) {
-				window_fn = bartlett;}
+				window_fn = rectangle;
+			} else if (strcmp("hamming",  optarg) == 0) {
+				window_fn = hamming;
+			} else if (strcmp("blackman",  optarg) == 0) {
+				window_fn = blackman;
+			} else if (strcmp("blackman-harris",  optarg) == 0) {
+				window_fn = blackman_harris;
+			} else if (strcmp("hann-poisson",  optarg) == 0) {
+				window_fn = hann_poisson;
+			} else if (strcmp("youssef",  optarg) == 0) {
+				window_fn = youssef;
+			} else if (strcmp("kaiser",  optarg) == 0) {
+				window_fn = kaiser;
+			} else if (strcmp("bartlett",  optarg) == 0) {
+				window_fn = bartlett;
+			} else {
+				fprintf(stderr, "Unknown window function %s\n", optarg);
+				usage();
+			}
 			break;
 		case 't':
 			fft_threads = atoi(optarg);
@@ -1052,13 +1106,8 @@ int main(int argc, char **argv)
 		time_now = time(NULL);
 		if (time_now < next_tick) {
 			continue;}
-		// time, Hz low, Hz high, Hz step, samples, dbm, dbm, ...
-		localtime_r(&time_now, &cal_time);
-		strftime(t_str, 50, "%Y-%m-%d, %H:%M:%S", &cal_time);
 		for (i=0; i<tuning_count; i++) {
-			fprintf(file, "%s, ", t_str);
-			save_tuning_result(&tunings[i]);
-		}
+			save_tuning_result(&tunings[i]);}
 		fflush(file);
 		while (time(NULL) >= next_tick) {
 			next_tick += interval;}
