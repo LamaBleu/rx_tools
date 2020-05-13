@@ -68,16 +68,16 @@
 
 #define MAX(x, y) (((x) > (y)) ? (x) : (y))
 
-#define DEFAULT_BUF_LENGTH		(1 * 16384)
-#define BUFFER_DUMP				DEFAULT_BUF_LENGTH
+#define DEFAULT_BUF_LENGTH	(1 * 16384)
+#define BUFFER_DUMP		DEFAULT_BUF_LENGTH
 
-#define MAXIMUM_RATE			2800000
-#define MINIMUM_RATE			1000000
+#define MAXIMUM_RATE		2800000		/* RTL can digitise at most 2.8MSPS */
+#define MINIMUM_RATE		1000000		/* Use at least 1MSPS */
 
 static volatile int do_exit = 0;
 static SoapySDRDevice *dev = NULL;
 static SoapySDRStream *stream = NULL;
-FILE *file;
+FILE* file;		/* Output file pointer */
 
 int16_t* Sinewave;
 double* power_table;
@@ -89,28 +89,28 @@ int *window_coefs;
 struct tuning_state
 /* one per tuning range */
 {
-	int64_t freq;
-	int rate;
-	int bin_e;
-	int64_t *avg;  /* length == 2^bin_e */
-	int samples;
-	int downsample;
-	int downsample_passes;  /* for the recursive filter */
-	double crop;
+	int64_t		freq;			/* Centre frequency */
+	int		rate;			/* Data rate (I/Q pairs/second) */
+	int		bin_e;			/* log2(fft_length) */
+	int64_t*	avg;			/* length == 2^bin_e */
+	int		samples;		/* How many samples have been accumulated */
+	int		downsample;
+	int		downsample_passes;	/* for the recursive filter */
+	double		crop;			/* Proportion of the FFT data that is to be cropped */
 	//pthread_rwlock_t avg_lock;
 	//pthread_mutex_t avg_mutex;
 	/* having the iq buffer here is wasteful, but will avoid contention */
-	int16_t *buf16;
-	int buf_len;
-	//int *comp_fir;
+	int16_t*	buf16;
+	int		buf_len;
+	//int*		comp_fir;
 	//pthread_rwlock_t buf_lock;
 	//pthread_mutex_t buf_mutex;
 };
 
 /* 10000 is enough for 10GHz b/w worst case */
-#define MAX_TUNES	10000
-struct tuning_state tunes[MAX_TUNES];
-int tune_count = 0;
+#define MAX_TUNINGS	10000
+struct tuning_state tunings[MAX_TUNINGS];
+int tuning_count = 0;
 
 int boxcar = 1;
 int comp_fir_size = 0;
@@ -429,12 +429,13 @@ void rms_power(struct tuning_state *ts)
 }
 
 void frequency_range(char *arg, double crop)
-/* flesh out the tunes[] for scanning */
+/* flesh out the tunings[] for scanning */
 // do we want the fewest ranges (easy) or the fewest bins (harder)?
 {
 	char *start, *stop, *step;
 	int i, j, bin_e, buf_len;
-	int64_t upper, lower, max_size, bw_seen, bw_used;
+	int64_t upper, lower, max_size;
+	int64_t bw_seen, bw_used;
 	int64_t downsample, downsample_passes;
 	double bin_size;
 	struct tuning_state *ts;
@@ -458,12 +459,12 @@ void frequency_range(char *arg, double crop)
 		bw_used = (int64_t)((double)(bw_seen) / (1.0 - crop));
 		if (bw_used > MAXIMUM_RATE) {
 			continue;}
-		tune_count = i;
+		tuning_count = i;
 		break;
 	}
 	/* unless small bandwidth */
 	if (bw_used < MINIMUM_RATE) {
-		tune_count = 1;
+		tuning_count = 1;
 		downsample = MAXIMUM_RATE / bw_used;
 		if (downsample <= 0) {
 			fprintf(stderr, "unsupported bandwidth: MAXIMUM_RATE=%d, bw_used=%lli, downsample=%lli\n", MAXIMUM_RATE, (long long)bw_used, (long long)downsample);
@@ -493,11 +494,11 @@ void frequency_range(char *arg, double crop)
 	if (max_size >= MINIMUM_RATE) {
 		bw_seen = max_size;
 		bw_used = max_size;
-		tune_count = (upper - lower) / bw_seen;
+		tuning_count = (upper - lower) / bw_seen;
 		bin_e = 0;
 		crop = 0;
 	}
-	if (tune_count > MAX_TUNES) {
+	if (tuning_count > MAX_TUNINGS) {
 		fprintf(stderr, "Error: bandwidth too wide.\n");
 		exit(1);
 	}
@@ -506,8 +507,8 @@ void frequency_range(char *arg, double crop)
 		buf_len = DEFAULT_BUF_LENGTH;
 	}
 	/* build the array */
-	for (i=0; i<tune_count; i++) {
-		ts = &tunes[i];
+	for (i=0; i<tuning_count; i++) {
+		ts = tunings+i;
 		ts->freq = lower + i*bw_seen + bw_seen/2;
 		ts->rate = bw_used;
 		ts->bin_e = bin_e;
@@ -531,13 +532,13 @@ void frequency_range(char *arg, double crop)
 		ts->buf_len = buf_len;
 	}
 	/* report */
-	fprintf(stderr, "Number of frequency hops: %i\n", tune_count);
+	fprintf(stderr, "Number of frequency hops: %i\n", tuning_count);
 	fprintf(stderr, "Dongle bandwidth: %lliHz\n", (long long)bw_used);
 	fprintf(stderr, "Downsampling by: %llix\n", (long long)downsample);
 	fprintf(stderr, "Cropping by: %0.2f%%\n", crop*100);
-	fprintf(stderr, "Total FFT bins: %i\n", tune_count * (1<<bin_e));
+	fprintf(stderr, "Total FFT bins: %i\n", tuning_count * (1<<bin_e));
 	fprintf(stderr, "Logged FFT bins: %i\n", \
-	  (int)((double)(tune_count * (1<<bin_e)) * (1.0-crop)));
+	  (int)((double)(tuning_count * (1<<bin_e)) * (1.0-crop)));
 	fprintf(stderr, "FFT bin size: %0.2fHz\n", bin_size);
 	fprintf(stderr, "Buffer size: %i bytes (%0.2fms)\n", buf_len, 1000 * 0.5 * (float)buf_len / (float)bw_used);
 }
@@ -673,13 +674,13 @@ void scanner(size_t channel)
 	int32_t w;
 	int64_t f;
 	struct tuning_state *ts;
-	bin_e = tunes[0].bin_e;
+	bin_e = tunings[0].bin_e;
 	bin_len = 1 << bin_e;
-	buf_len = tunes[0].buf_len;
-	for (i=0; i<tune_count; i++) {
+	buf_len = tunings[0].buf_len;
+	for (i=0; i<tuning_count; i++) {
 		if (do_exit >= 2)
 			{return;}
-		ts = &tunes[i];
+		ts = &tunings[i];
 		f = (int64_t)SoapySDRDevice_getFrequency(dev, SOAPY_SDR_RX, channel);
 
 		if (f != ts->freq) {
@@ -771,15 +772,27 @@ void scanner(size_t channel)
 	}
 }
 
-void csv_dbm(struct tuning_state *ts)
+void save_bin(struct tuning_state* ts, int i, long long freq)
+{
+	// something seems off with the dbm math
+	double dbm;
+	dbm  = (double)ts->avg[i];
+	dbm /= (double)ts->rate;
+	dbm /= (double)ts->samples;
+	dbm  = 10 * log10(dbm);
+	fprintf(file, ", %.2f", dbm);
+}
+
+void save_tuning_result(struct tuning_state *ts)
 {
 	int i, len, ds, i1, i2, bw2, bin_count;
-	int64_t tmp;
-	double dbm;
+	long long freq;
 	len = 1 << ts->bin_e;
 	ds = ts->downsample;
+
 	/* fix FFT stuff quirks */
 	if (ts->bin_e > 0) {
+		int64_t tmp;
 		/* nuke DC component (not effective for all windows) */
 		ts->avg[0] = ts->avg[1];
 		/* FFT is translated by 180 degrees */
@@ -789,30 +802,28 @@ void csv_dbm(struct tuning_state *ts)
 			ts->avg[i+len/2] = tmp;
 		}
 	}
+
 	/* Hz low, Hz high, Hz step, samples, dbm, dbm, ... */
 	bin_count = (int)((double)len * (1.0 - ts->crop));
-	bw2 = (int)(((double)ts->rate * (double)bin_count) / (len * 2 * ds));
-	fprintf(file, "%lli, %lli, %.2f, %i, ", (long long)ts->freq - bw2, (long long)ts->freq + bw2,
-		(double)ts->rate / (double)(len*ds), ts->samples);
-	// something seems off with the dbm math
-	i1 = 0 + (int)((double)len * ts->crop * 0.5);
-	i2 = (len-1) - (int)((double)len * ts->crop * 0.5);
-	for (i=i1; i<=i2; i++) {
-		dbm  = (double)ts->avg[i];
-		dbm /= (double)ts->rate;
-		dbm /= (double)ts->samples;
-		dbm  = 10 * log10(dbm);
-		fprintf(file, "%.2f, ", dbm);
-	}
-	dbm = (double)ts->avg[i2] / ((double)ts->rate * (double)ts->samples);
-	if (ts->bin_e == 0) {
-		dbm = ((double)ts->avg[0] / \
-		((double)ts->rate * (double)ts->samples));}
-	dbm  = 10 * log10(dbm);
-	fprintf(file, "%.2f\n", dbm);
-	for (i=0; i<len; i++) {
-		ts->avg[i] = 0L;
-	}
+	bw2 = (int)(((double)ts->rate * (double)bin_count) / (len * 2 * ds));	/* Half bandwidth */
+	fprintf(file, "%lli, %lli, %.2f, %i",
+		(long long)ts->freq - bw2,
+		(long long)ts->freq + bw2,
+		(double)ts->rate / (double)(len*ds),
+		ts->samples
+	);
+
+	/* crop some FFT bins off start and end: */
+	i1 = (int)((double)len * ts->crop * 0.5);
+	i2 = (len-1) - i1;
+
+	freq = (long long)ts->freq - bw2;
+	for (i=i1; i<=i2; i++, freq += 2*bw2/len)
+		save_bin(ts, i, freq);
+	fprintf(file, "\n");
+
+	/* Reset averages */
+	memset(ts->avg, 0, sizeof(ts->avg[0])*len);
 	ts->samples = 0;
 }
 
@@ -943,7 +954,7 @@ int main(int argc, char **argv)
 
 	frequency_range(freq_optarg, crop);
 
-	if (tune_count == 0) {
+	if (tuning_count == 0) {
 		usage();}
 
 	if (argc <= optind) {
@@ -1024,13 +1035,13 @@ int main(int argc, char **argv)
 	verbose_reset_buffer(dev);
 
 	/* actually do stuff */
-	SoapySDRDevice_setSampleRate(dev, SOAPY_SDR_RX, channel, (double)tunes[0].rate);
-	sine_table(tunes[0].bin_e);
+	SoapySDRDevice_setSampleRate(dev, SOAPY_SDR_RX, channel, (double)tunings[0].rate);
+	sine_table(tunings[0].bin_e);
 	next_tick = time(NULL) + interval;
 	if (exit_time) {
 		exit_time = time(NULL) + exit_time;}
-	fft_buf = malloc(tunes[0].buf_len * sizeof(int16_t) * 2);
-	length = 1 << tunes[0].bin_e;
+	fft_buf = malloc(tunings[0].buf_len * sizeof(int16_t) * 2);
+	length = 1 << tunings[0].bin_e;
 	window_coefs = malloc(length * sizeof(int));
 	for (i=0; i<length; i++) {
 		window_coefs[i] = (int)(256*window_fn(i, length));
@@ -1044,9 +1055,9 @@ int main(int argc, char **argv)
 		// time, Hz low, Hz high, Hz step, samples, dbm, dbm, ...
 		localtime_r(&time_now, &cal_time);
 		strftime(t_str, 50, "%Y-%m-%d, %H:%M:%S", &cal_time);
-		for (i=0; i<tune_count; i++) {
+		for (i=0; i<tuning_count; i++) {
 			fprintf(file, "%s, ", t_str);
-			csv_dbm(&tunes[i]);
+			save_tuning_result(&tunings[i]);
 		}
 		fflush(file);
 		while (time(NULL) >= next_tick) {
@@ -1072,9 +1083,9 @@ int main(int argc, char **argv)
 	SoapySDRDevice_unmake(dev);
 	free(fft_buf);
 	free(window_coefs);
-	//for (i=0; i<tune_count; i++) {
-	//	free(tunes[i].avg);
-	//	free(tunes[i].buf16);
+	//for (i=0; i<tuning_count; i++) {
+	//	free(tunings[i].avg);
+	//	free(tunings[i].buf16);
 	//}
 	return r >= 0 ? r : -r;
 }
