@@ -1108,6 +1108,13 @@ int main(int argc, char **argv)
 			continue;}
 		for (i=0; i<tuning_count; i++) {
 			save_tuning_result(&tunings[i]);}
+		switch (output_format) {
+                case FORMAT_CSV:
+                        break;
+                case FORMAT_GNUPLOT:
+                        fprintf(file, "\n");
+                        break;
+                }
 		fflush(file);
 		while (time(NULL) >= next_tick) {
 			next_tick += interval;}
